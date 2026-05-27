@@ -22,8 +22,8 @@
 ## 运行
 
 ```bash
-pnpm i
-pnpm run dev
+bun install
+bun run dev
 ```
 
 访问 http://localhost:5173
@@ -87,9 +87,20 @@ pnpm run dev
 
 所有配置（指标列表、Push Gateway 设置）会自动保存到 localStorage，刷新页面后自动恢复。
 
+## 代码质量
+
+- **包管理**: [bun](https://bun.sh) — 高性能 JavaScript 运行时与包管理器
+- **代码规范**: [Biome](https://biomejs.dev) — 统一的 lint 与格式化工具
+  - `bun run lint` — 检查并自动修复代码问题
+  - `bun run format` — 格式化代码
+- **CI/CD**: GitHub Actions — 每次推送自动执行 lint、类型检查和构建
+
 ## 项目结构
 
 ```
+.github/
+└── workflows/
+    └── ci.yml            # GitHub Actions CI/CD
 src/
 ├── types.ts              # 类型定义
 ├── utils.ts              # 工具函数
@@ -98,4 +109,5 @@ src/
 │   ├── MetricForm.tsx    # 添加指标表单
 │   └── ServerConfigModal.tsx # 配置弹窗
 └── App.tsx               # 主组件
+biome.json                # Biome 配置
 ```

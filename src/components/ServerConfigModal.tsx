@@ -96,7 +96,7 @@ export function ServerConfigModal({
             Test Connection
           </Button>
         </Form.Item>
-        {connectionError && <Alert type="error" message={connectionError} showIcon />}
+        {connectionError && <Alert type="error" description={connectionError} showIcon />}
       </Form>
     </Modal>
   )
