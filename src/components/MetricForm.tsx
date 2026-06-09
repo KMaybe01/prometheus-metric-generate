@@ -54,7 +54,7 @@ export function MetricForm({
         </Col>
         <Col xs={24} sm={8} md={6}>
           <Input
-            placeholder="Labels (e.g. method=GET, status=200)"
+            placeholder='Labels (e.g. method=GET, status=200 or {method="GET", status="200"})'
             value={labels}
             onChange={(e) => onLabelsChange(e.target.value)}
             onPressEnter={handleAdd}
