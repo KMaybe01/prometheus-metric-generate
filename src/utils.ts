@@ -85,7 +85,10 @@ export function parseLabels(labelsStr: string): Record<string, string> {
     const eqIdx = pair.indexOf('=')
     if (eqIdx === -1) continue
     const key = pair.slice(0, eqIdx).trim()
-    const value = pair.slice(eqIdx + 1).trim().replace(/["']/g, '')
+    const value = pair
+      .slice(eqIdx + 1)
+      .trim()
+      .replace(/["']/g, '')
     if (key && value) {
       labels[key] = value
     }
