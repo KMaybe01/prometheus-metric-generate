@@ -1,9 +1,20 @@
 import { ApiOutlined, CloseCircleOutlined, CloudServerOutlined, SettingOutlined, SyncOutlined } from '@ant-design/icons'
 import { Button, Card, Col, Form, Row, Space, Statistic, Tag, Typography, message } from 'antd'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { MetricCard, MetricForm, ServerConfigModal } from './components'
+import { MetricCard, MetricEditModal, type MetricEditResult, MetricForm, ServerConfigModal } from './components'
 import { ConnectionStatus, MetricConfig, MetricType, ServerConfig } from './types'
-import { loadFromStorage, parseLabels, saveToStorage, simulateValue } from './utils'
+import {
+  clampValue,
+  createSeries,
+  loadFromStorage,
+  migrateMetric,
+  parseLabels,
+  parseMetricText,
+  resolveLabels,
+  sameSeriesLabels,
+  saveToStorage,
+  simulateValue,
+} from './utils'
 
 const { Title, Text } = Typography
 
@@ -12,13 +23,19 @@ function App() {
 
   const [metrics, setMetrics] = useState<MetricConfig[]>(() => {
     const saved = loadFromStorage<MetricConfig[]>('metrics', [])
-    return saved.map((m) => ({ ...m, lastUpdate: new Date(m.lastUpdate) }))
+    return saved
+      .map(migrateMetric)
+      .map((m) => ({ ...m, series: m.series.map((s) => ({ ...s, lastUpdate: new Date(s.lastUpdate) })) }))
   })
 
   const [newMetricName, setNewMetricName] = useState('')
   const [newMetricType, setNewMetricType] = useState<MetricType>('gauge')
   const [newMetricLabels, setNewMetricLabels] = useState('')
   const [newMetricStep, setNewMetricStep] = useState(1)
+  const [newMetricMin, setNewMetricMin] = useState<number | undefined>(undefined)
+  const [newMetricMax, setNewMetricMax] = useState<number | undefined>(undefined)
+  const [pasteText, setPasteText] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(null)
 
   const [configModalVisible, setConfigModalVisible] = useState(false)
   const [serverConfig, setServerConfig] = useState<ServerConfig>(() =>
@@ -56,29 +73,28 @@ function App() {
       if (!serverConfig.pushGatewayUrl || !metric || !metric.isPushing) return
 
       try {
-        const labels = Object.entries(metric.labels)
-          .map(([k, v]) => `${k}="${v}"`)
-          .join(',')
-
         const lines: string[] = []
         lines.push(`# HELP ${metric.name} Mock metric`)
         lines.push(`# TYPE ${metric.name} ${metric.type}`)
 
-        const labelStr = labels ? `{${labels}}` : ''
+        for (const series of metric.series) {
+          const entries = Object.entries(resolveLabels(series.labels))
+          const labelStr = entries.length > 0 ? `{${entries.map(([k, v]) => `${k}="${v}"`).join(',')}}` : ''
 
-        switch (metric.type) {
-          case 'gauge':
-          case 'counter':
-            lines.push(`${metric.name}${labelStr} ${metric.value}`)
-            break
-          case 'histogram':
-            lines.push(`${metric.name}_count${labelStr} ${metric.value}`)
-            lines.push(`${metric.name}_sum${labelStr} ${metric.value * 10}`)
-            break
-          case 'summary':
-            lines.push(`${metric.name}_count${labelStr} ${metric.value}`)
-            lines.push(`${metric.name}_sum${labelStr} ${metric.value * 100}`)
-            break
+          switch (metric.type) {
+            case 'gauge':
+            case 'counter':
+              lines.push(`${metric.name}${labelStr} ${series.value}`)
+              break
+            case 'histogram':
+              lines.push(`${metric.name}_count${labelStr} ${series.value}`)
+              lines.push(`${metric.name}_sum${labelStr} ${series.value * 10}`)
+              break
+            case 'summary':
+              lines.push(`${metric.name}_count${labelStr} ${series.value}`)
+              lines.push(`${metric.name}_sum${labelStr} ${series.value * 100}`)
+              break
+          }
         }
 
         const pushUrl = `${serverConfig.pushGatewayUrl.replace(/\/$/, '')}/metrics/job/${metric.name}`
@@ -165,8 +181,11 @@ function App() {
               m.id === metric.id
                 ? {
                     ...m,
-                    value: simulateValue(m),
-                    lastUpdate: new Date(),
+                    series: m.series.map((s) => ({
+                      ...s,
+                      value: simulateValue(m, s.value),
+                      lastUpdate: new Date(),
+                    })),
                   }
                 : m,
             ),
@@ -225,25 +244,92 @@ function App() {
     }
   }, [metrics, serverConfig.pushGatewayUrl, serverConfig.interval, pushMetricToGateway])
 
-  const addMetric = () => {
-    if (!newMetricName.trim()) return
-
-    const newMetric: MetricConfig = {
-      id: Date.now().toString(),
-      name: newMetricName,
-      type: newMetricType,
-      isRunning: true,
-      isPushing: !!serverConfig.pushGatewayUrl,
-      value: 0,
-      labels: parseLabels(newMetricLabels),
-      stepValue: newMetricStep,
-      isExpanded: true,
-      lastUpdate: new Date(),
+  const validateRange = () => {
+    if (newMetricMin != null && newMetricMax != null && newMetricMin > newMetricMax) {
+      message.error('Min value must be less than or equal to Max value')
+      return false
     }
+    return true
+  }
 
-    setMetrics((prev) => [...prev, newMetric])
+  const createMetric = (name: string, labels: Record<string, string>): MetricConfig => ({
+    id: Date.now().toString(),
+    name,
+    type: newMetricType,
+    isRunning: true,
+    isPushing: !!serverConfig.pushGatewayUrl,
+    series: [createSeries(`${Date.now()}-0`, labels, newMetricMin ?? 0)],
+    stepValue: newMetricStep,
+    minValue: newMetricMin,
+    maxValue: newMetricMax,
+    isExpanded: true,
+  })
+
+  // Same-name metrics are merged into one card as an additional series
+  const addOrMergeSeries = (name: string, labels: Record<string, string>) => {
+    const existing = metricsRef.current.find((m) => m.name === name)
+    if (!existing) {
+      setMetrics((prev) => [...prev, createMetric(name, labels)])
+      message.success(`Metric "${name}" created`)
+      return
+    }
+    if (existing.series.some((s) => sameSeriesLabels(s.labels, labels))) {
+      message.warning(`Metric "${name}" already contains this label combination, skipped`)
+      return
+    }
+    const newSeries = createSeries(`${Date.now()}-${existing.series.length}`, labels, existing.minValue ?? 0)
+    setMetrics((prev) => prev.map((m) => (m.id === existing.id ? { ...m, series: [...m.series, newSeries] } : m)))
+    message.success(`Added series to existing metric "${name}" (now ${existing.series.length + 1} series)`)
+  }
+
+  const addMetric = () => {
+    if (!newMetricName.trim() || !validateRange()) return
+    addOrMergeSeries(newMetricName.trim(), parseLabels(newMetricLabels))
     setNewMetricName('')
     setNewMetricLabels('')
+  }
+
+  const addParsedMetric = () => {
+    if (!pasteText.trim() || !validateRange()) return
+
+    const parsed = parseMetricText(pasteText)
+    if (!parsed) {
+      message.error('Cannot parse metric. Expected format: metric_name{label="value", ...}')
+      return
+    }
+
+    addOrMergeSeries(parsed.name, parsed.labels)
+    setPasteText('')
+  }
+
+  const updateMetric = (result: MetricEditResult) => {
+    if (!editingId) return
+    setMetrics((prev) =>
+      prev.map((m) => {
+        if (m.id !== editingId) return m
+        // Preserve each series' current value by matching its id; new series start at min
+        const series = result.series.map((rs) => {
+          const old = m.series.find((s) => s.id === rs.id)
+          return createSeries(
+            rs.id,
+            rs.labels,
+            old ? clampValue(old.value, result.minValue, result.maxValue) : (result.minValue ?? 0),
+            old?.lastUpdate ?? new Date(),
+          )
+        })
+        return {
+          ...m,
+          name: result.name,
+          type: result.type,
+          stepValue: result.stepValue,
+          minValue: result.minValue,
+          maxValue: result.maxValue,
+          series,
+        }
+      }),
+    )
+    setEditingId(null)
+    message.success('Metric updated')
   }
 
   const toggleMetric = (id: string) => {
@@ -347,11 +433,18 @@ function App() {
         metricType={newMetricType}
         labels={newMetricLabels}
         stepValue={newMetricStep}
+        minValue={newMetricMin}
+        maxValue={newMetricMax}
+        pasteText={pasteText}
         onNameChange={setNewMetricName}
         onTypeChange={setNewMetricType}
         onLabelsChange={setNewMetricLabels}
         onStepChange={setNewMetricStep}
+        onMinChange={setNewMetricMin}
+        onMaxChange={setNewMetricMax}
+        onPasteChange={setPasteText}
         onAdd={addMetric}
+        onAddParsed={addParsedMetric}
       />
 
       <Row gutter={[24, 24]} style={{ marginBottom: 32 }}>
@@ -407,6 +500,7 @@ function App() {
                 onToggleRun={toggleMetric}
                 onTogglePush={togglePush}
                 onToggleExpand={toggleExpand}
+                onEdit={setEditingId}
                 onDelete={deleteMetric}
               />
             </Col>
@@ -423,6 +517,13 @@ function App() {
         onSave={saveConfig}
         onTestConnection={testConnection}
         onResetConnection={resetConnection}
+      />
+
+      <MetricEditModal
+        visible={editingId != null}
+        metric={metrics.find((m) => m.id === editingId) ?? null}
+        onCancel={() => setEditingId(null)}
+        onSave={updateMetric}
       />
     </div>
   )
